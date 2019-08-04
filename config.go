@@ -26,6 +26,7 @@ import (
 	"github.com/lightningnetwork/lnd/chanbackup"
 	"github.com/lightningnetwork/lnd/channeldb"
 	"github.com/lightningnetwork/lnd/discovery"
+	"github.com/lightningnetwork/lnd/htlcswitch"
 	"github.com/lightningnetwork/lnd/htlcswitch/hodl"
 	"github.com/lightningnetwork/lnd/lncfg"
 	"github.com/lightningnetwork/lnd/lnrpc/routerrpc"
@@ -33,7 +34,6 @@ import (
 	"github.com/lightningnetwork/lnd/lnwire"
 	"github.com/lightningnetwork/lnd/routing"
 	"github.com/lightningnetwork/lnd/tor"
-	"github.com/lightningnetwork/lnd/watchtower"
 )
 
 const (
@@ -308,9 +308,13 @@ type config struct {
 	NumGraphSyncPeers      int           `long:"numgraphsyncpeers" description:"The number of peers that we should receive new graph updates from. This option can be tuned to save bandwidth for light clients or routing nodes."`
 	HistoricalSyncInterval time.Duration `long:"historicalsyncinterval" description:"The polling interval between historical graph sync attempts. Each historical graph sync attempt ensures we reconcile with the remote peer's graph from the genesis block."`
 
+	IgnoreHistoricalGossipFilters bool `long:"ignore-historical-gossip-filters" description:"If true, will not reply with historical data that matches the range specified by a remote peer's gossip_timestamp_filter. Doing so will result in lower memory and bandwidth requirements."`
+
 	RejectPush bool `long:"rejectpush" description:"If true, lnd will not accept channel opening requests with non-zero push amounts. This should prevent accidental pushes to merchant nodes."`
 
 	StaggerInitialReconnect bool `long:"stagger-initial-reconnect" description:"If true, will apply a randomized staggering between 0s and 30s when reconnecting to persistent peers on startup. The first 10 reconnections will be attempted instantly, regardless of the flag's value"`
+
+	MaxOutgoingCltvExpiry uint32 `long:"max-cltv-expiry" description:"The maximum number of blocks funds could be locked up for when forwarding payments."`
 
 	net tor.Net
 
@@ -425,6 +429,7 @@ func loadConfig() (*config, error) {
 		Watchtower: &lncfg.Watchtower{
 			TowerDir: defaultTowerDir,
 		},
+		MaxOutgoingCltvExpiry: htlcswitch.DefaultMaxOutgoingCltvExpiry,
 	}
 
 	// Pre-parse the command line options to pick up an alternative config
@@ -1089,17 +1094,6 @@ func loadConfig() (*config, error) {
 	)
 	if err != nil {
 		return nil, err
-	}
-
-	// If the user provided private watchtower addresses, parse them to
-	// obtain the LN addresses.
-	if cfg.WtClient.IsActive() {
-		err := cfg.WtClient.ParsePrivateTowers(
-			watchtower.DefaultPeerPort, cfg.net.ResolveTCPAddr,
-		)
-		if err != nil {
-			return nil, err
-		}
 	}
 
 	// Finally, ensure that the user's color is correctly formatted,

@@ -653,21 +653,28 @@ func newServer(listenAddrs []net.Addr, chanDB *channeldb.DB,
 	// servers, the mission control instance itself can be moved there too.
 	routingConfig := routerrpc.GetRoutingConfig(cfg.SubRPCServers.RouterRPC)
 
-	s.missionControl = routing.NewMissionControl(
+	s.missionControl, err = routing.NewMissionControl(
+		chanDB.DB,
 		&routing.MissionControlConfig{
 			AprioriHopProbability: routingConfig.AprioriHopProbability,
 			PenaltyHalfLife:       routingConfig.PenaltyHalfLife,
+			MaxMcHistory:          routingConfig.MaxMcHistory,
 		},
 	)
+	if err != nil {
+		return nil, fmt.Errorf("can't create mission control: %v", err)
+	}
 
 	srvrLog.Debugf("Instantiating payment session source with config: "+
 		"PaymentAttemptPenalty=%v, MinRouteProbability=%v",
-		int64(routingConfig.PaymentAttemptPenalty.ToSatoshis()),
+		int64(routingConfig.AttemptCost),
 		routingConfig.MinRouteProbability)
 
 	pathFindingConfig := routing.PathFindingConfig{
-		PaymentAttemptPenalty: routingConfig.PaymentAttemptPenalty,
-		MinProbability:        routingConfig.MinRouteProbability,
+		PaymentAttemptPenalty: lnwire.NewMSatFromSatoshis(
+			routingConfig.AttemptCost,
+		),
+		MinProbability: routingConfig.MinRouteProbability,
 	}
 
 	paymentSessionSource := &routing.SessionSource{
@@ -712,24 +719,25 @@ func newServer(listenAddrs []net.Addr, chanDB *channeldb.DB,
 	}
 
 	s.authGossiper = discovery.New(discovery.Config{
-		Router:               s.chanRouter,
-		Notifier:             s.cc.chainNotifier,
-		ChainHash:            *activeNetParams.GenesisHash,
-		Broadcast:            s.BroadcastMessage,
-		ChanSeries:           chanSeries,
-		NotifyWhenOnline:     s.NotifyWhenOnline,
-		NotifyWhenOffline:    s.NotifyWhenOffline,
-		ProofMatureDelta:     0,
-		TrickleDelay:         time.Millisecond * time.Duration(cfg.TrickleDelay),
-		RetransmitDelay:      time.Minute * 30,
-		WaitingProofStore:    waitingProofStore,
-		MessageStore:         gossipMessageStore,
-		AnnSigner:            s.nodeSigner,
-		RotateTicker:         ticker.New(discovery.DefaultSyncerRotationInterval),
-		HistoricalSyncTicker: ticker.New(cfg.HistoricalSyncInterval),
-		NumActiveSyncers:     cfg.NumGraphSyncPeers,
-		MinimumBatchSize:     10,
-		SubBatchDelay:        time.Second * 5,
+		Router:                  s.chanRouter,
+		Notifier:                s.cc.chainNotifier,
+		ChainHash:               *activeNetParams.GenesisHash,
+		Broadcast:               s.BroadcastMessage,
+		ChanSeries:              chanSeries,
+		NotifyWhenOnline:        s.NotifyWhenOnline,
+		NotifyWhenOffline:       s.NotifyWhenOffline,
+		ProofMatureDelta:        0,
+		TrickleDelay:            time.Millisecond * time.Duration(cfg.TrickleDelay),
+		RetransmitDelay:         time.Minute * 30,
+		WaitingProofStore:       waitingProofStore,
+		MessageStore:            gossipMessageStore,
+		AnnSigner:               s.nodeSigner,
+		RotateTicker:            ticker.New(discovery.DefaultSyncerRotationInterval),
+		HistoricalSyncTicker:    ticker.New(cfg.HistoricalSyncInterval),
+		NumActiveSyncers:        cfg.NumGraphSyncPeers,
+		MinimumBatchSize:        10,
+		SubBatchDelay:           time.Second * 5,
+		IgnoreHistoricalFilters: cfg.IgnoreHistoricalGossipFilters,
 	},
 		s.identityPriv.PubKey(),
 	)
@@ -1081,7 +1089,7 @@ func newServer(listenAddrs []net.Addr, chanDB *channeldb.DB,
 		return nil, err
 	}
 
-	if cfg.WtClient.IsActive() {
+	if cfg.WtClient.Active {
 		policy := wtpolicy.DefaultPolicy()
 
 		if cfg.WtClient.SweepFeeRate != 0 {
@@ -1104,7 +1112,6 @@ func newServer(listenAddrs []net.Addr, chanDB *channeldb.DB,
 			Dial:           cfg.net.Dial,
 			AuthDial:       wtclient.AuthDial,
 			DB:             towerClientDB,
-			PrivateTower:   cfg.WtClient.PrivateTowers[0],
 			Policy:         policy,
 			ChainHash:      *activeNetParams.GenesisHash,
 			MinBackoff:     10 * time.Second,
